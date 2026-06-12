@@ -55,7 +55,6 @@ async def test_async_setup_entry_refresh_failure(
     mock_coordinator = MagicMock()
     monkeypatch.setattr(resmed_module, "MyAirDataUpdateCoordinator", mock_coordinator)
     instance = mock_coordinator.return_value
-    instance.async_initialize = AsyncMock()
     instance.async_config_entry_first_refresh = AsyncMock(side_effect=RuntimeError("refresh fail"))
 
     # Replace hass.config_entries.async_forward_entry_setups with an AsyncMock and keep a ref
@@ -83,7 +82,6 @@ async def test_async_setup_entry_multiple_calls(
     mock_coordinator = MagicMock()
     monkeypatch.setattr(resmed_module, "MyAirDataUpdateCoordinator", mock_coordinator)
     instance = mock_coordinator.return_value
-    instance.async_initialize = AsyncMock()
     instance.async_config_entry_first_refresh = AsyncMock()
 
     monkeypatch.setattr(resmed_module, "async_migrate_mask_leak_statistics_metadata", MagicMock())
@@ -113,7 +111,6 @@ async def test_async_setup_entry_migrates_mask_leak_statistics_metadata(
 
     mock_coordinator = MagicMock()
     monkeypatch.setattr(resmed_module, "MyAirDataUpdateCoordinator", mock_coordinator)
-    mock_coordinator.return_value.async_initialize = AsyncMock()
     mock_coordinator.return_value.async_config_entry_first_refresh = AsyncMock()
     migrate_statistics = MagicMock()
     monkeypatch.setattr(
@@ -474,7 +471,6 @@ async def test_force_poll_service_triggers_refresh(
     # attributes tests expect (async_refresh, async_config_entry_first_refresh, .data)
     dummy_coordinator = coordinator_factory(mock=True)
     dummy_coordinator.data = coordinator_data(device={"serialNumber": "SN123"}, sleep_records=[])
-    dummy_coordinator.async_initialize = AsyncMock()
     config_entry.runtime_data = dummy_coordinator
     config_entry.hass = hass
 

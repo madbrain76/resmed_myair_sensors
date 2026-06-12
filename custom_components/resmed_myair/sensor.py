@@ -1,19 +1,12 @@
 """Home Assistant sensor entities for ResMed myAir account data."""
 
 from abc import abstractmethod
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime, time
+from collections.abc import Mapping
+from datetime import date
 import logging
 import re
-from typing import Any, Final, cast
+from typing import Any, Final
 
-from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
-from homeassistant.components.recorder.statistics import (
-    async_add_external_statistics,
-    get_last_statistics,
-)
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -25,7 +18,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.util import dt as dt_util, slugify
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_USER_NAME,
@@ -36,6 +29,15 @@ from .const import (
 )
 from .coordinator import MyAirDataUpdateCoordinator
 from .models import MyAirCoordinatorData, MyAirDevice, MyAirSleepRecord
+from .recorder import (
+    HistoricalStatisticDescription,
+    async_import_historical_statistics,
+    build_daily_usage_hours,
+    build_sleep_record_statistic,
+    historical_statistic_id,
+    normalize_sleep_history,
+    usage_minutes_to_hours,
+)
 from .redaction import redact_dict
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -73,23 +75,6 @@ def _parse_native_value(value: Any | None, description: SensorEntityDescription)
     if isinstance(value, str) and description.device_class == SensorDeviceClass.TIMESTAMP:
         return dt_util.parse_datetime(value)
     return value
-
-
-@dataclass(frozen=True)
-class HistoricalStatisticDescription:
-    """Description of an imported nightly statistic."""
-
-    name: str
-    unit_of_measurement: str | None
-    value_fn: Callable[[Mapping[str, Any]], float | int | None]
-    import_mode: str = "state"
-    round_digits: int | None = None
-
-
-def _round_stat_value(value: float, digits: int | None) -> float:
-    """Normalize a value for recorder statistics."""
-    rounded = round(float(value), digits) if digits is not None else float(value)
-    return float(rounded)
 
 
 async def async_setup_entry(
@@ -214,12 +199,7 @@ class MyAirBaseSensor(CoordinatorEntity[MyAirDataUpdateCoordinator], SensorEntit
 
         device = _coordinator_data(self.coordinator).device
         serial_number = device.serial_number if device else "unknown"
-        suffix = (
-            f"{self.sensor_key}_{statistic_desc.import_mode}"
-            if statistic_desc.import_mode != "state"
-            else self.sensor_key
-        )
-        return f"{DOMAIN}:{slugify(f'{serial_number}_{suffix}')}"
+        return historical_statistic_id(serial_number, self.sensor_key, statistic_desc.import_mode)
 
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
@@ -243,71 +223,12 @@ class MyAirBaseSensor(CoordinatorEntity[MyAirDataUpdateCoordinator], SensorEntit
         if not sleep_records:
             return
 
-        last_stat = await get_instance(self.hass).async_add_executor_job(
-            get_last_statistics,
+        await async_import_historical_statistics(
             self.hass,
-            1,
+            sleep_records,
             statistic_id,
-            True,
-            {"sum"} if statistic_desc.import_mode == "sum" else set(),
+            statistic_desc,
         )
-
-        last_imported_date: date | None = None
-        last_sum = 0.0
-        if last_stat and statistic_id in last_stat and last_stat[statistic_id]:
-            last_row = last_stat[statistic_id][0]
-            end_ts = last_row.get("end")
-            if isinstance(end_ts, datetime):
-                last_imported_date = dt_util.as_local(end_ts).date()
-            elif end_ts is not None:
-                last_imported_date = datetime.fromtimestamp(end_ts, tz=dt_util.UTC).date()
-            last_sum_raw = last_row.get("sum")
-            if statistic_desc.import_mode == "sum" and last_sum_raw is not None:
-                last_sum = float(last_sum_raw)
-
-        statistics: list[StatisticData] = []
-        running_sum = last_sum
-        for record in sleep_records:
-            if record.start_date is None:
-                continue
-            if last_imported_date is not None and record.start_date <= last_imported_date:
-                continue
-
-            raw_value = statistic_desc.value_fn(record.raw)
-            if raw_value is None:
-                continue
-
-            stat_value = _round_stat_value(raw_value, statistic_desc.round_digits)
-            start = datetime.combine(record.start_date, time.min, tzinfo=dt_util.DEFAULT_TIME_ZONE)
-            if statistic_desc.import_mode == "sum":
-                running_sum = _round_stat_value(
-                    running_sum + stat_value, statistic_desc.round_digits
-                )
-                statistics.append(StatisticData(start=start, sum=running_sum))
-            else:
-                statistics.append(StatisticData(start=start, state=stat_value))
-
-        if not statistics:
-            return
-
-        metadata = cast(
-            "StatisticMetaData",
-            {
-                "has_mean": False,
-                "has_sum": statistic_desc.import_mode == "sum",
-                "name": statistic_desc.name,
-                "source": DOMAIN,
-                "statistic_id": statistic_id,
-                "unit_of_measurement": statistic_desc.unit_of_measurement,
-            },
-        )
-
-        _LOGGER.debug(
-            "Importing %s nightly statistics entries for %s",
-            len(statistics),
-            statistic_id,
-        )
-        async_add_external_statistics(self.hass, metadata, statistics)
 
     def _schedule_historical_statistics_import(self) -> None:
         """Schedule a recorder statistics import if this entity supports it."""
@@ -373,7 +294,7 @@ class MyAirSleepRecordSensor(MyAirRawSensor):
     ) -> None:
         """Initialize a raw sleep-record sensor."""
         super().__init__(friendly_name, sensor_desc, coordinator)
-        self._historical_statistic_desc = _build_sleep_record_statistic(friendly_name, sensor_desc)
+        self._historical_statistic_desc = build_sleep_record_statistic(friendly_name, sensor_desc)
 
     @property
     def _historical_statistic(self) -> HistoricalStatisticDescription | None:
@@ -469,7 +390,7 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
             value_fn=lambda record: (
                 None
                 if record.get("totalUsage") is None
-                else _usage_minutes_to_hours(record["totalUsage"])
+                else usage_minutes_to_hours(record["totalUsage"])
             ),
             import_mode="sum",
             round_digits=2,
@@ -484,7 +405,7 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return extra state attributes for dashboard cards."""
         attributes = dict(super().extra_state_attributes or {})
-        attributes["daily_usage_hours"] = _build_daily_usage_hours(
+        attributes["daily_usage_hours"] = build_daily_usage_hours(
             self.coordinator.chart_sleep_records
         )
         return attributes
@@ -501,7 +422,7 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
             value = (
                 None
                 if latest_record.total_usage_minutes is None
-                else _usage_minutes_to_hours(latest_record.total_usage_minutes)
+                else usage_minutes_to_hours(latest_record.total_usage_minutes)
             )
             self._available = value is not None
             if value is None:
@@ -534,10 +455,13 @@ class MyAirUsageHoursAverageSensor(MyAirBaseSensor):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Publish the average usage hours over the configured trailing window."""
+        normalized_records = normalize_sleep_history(
+            [record.raw for record in _coordinator_data(self.coordinator).sleep_records]
+        )
         usage_hours = [
-            _usage_minutes_to_hours(record.total_usage_minutes)
-            for record in _coordinator_data(self.coordinator).sleep_records
-            if record.total_usage_minutes is not None and record.start_date is not None
+            usage_minutes_to_hours(record["totalUsage"])
+            for record in normalized_records
+            if record.get("totalUsage") is not None
         ]
         if not usage_hours:
             self._attr_native_value = None
@@ -582,81 +506,3 @@ class MyAirMostRecentSleepDate(MyAirBaseSensor):
             _LOGGER.error("Sleep record data missing from coordinator data")
 
         self.async_write_ha_state()
-
-
-def _build_sleep_record_statistic(
-    friendly_name: str,
-    sensor_desc: SensorEntityDescription,
-) -> HistoricalStatisticDescription | None:
-    """Build a recorder statistic description for nightly sleep metrics."""
-    if sensor_desc.key == "ahi":
-        return HistoricalStatisticDescription(
-            name=friendly_name,
-            unit_of_measurement=sensor_desc.native_unit_of_measurement,
-            value_fn=lambda record: _coerce_stat_number(record.get("ahi")),
-            round_digits=2,
-        )
-    if sensor_desc.key == "maskPairCount":
-        return HistoricalStatisticDescription(
-            name=friendly_name,
-            unit_of_measurement=sensor_desc.native_unit_of_measurement,
-            value_fn=lambda record: _coerce_stat_number(record.get("maskPairCount")),
-        )
-    if sensor_desc.key == "leakPercentile":
-        return HistoricalStatisticDescription(
-            name=friendly_name,
-            unit_of_measurement=sensor_desc.native_unit_of_measurement,
-            value_fn=lambda record: _coerce_stat_number(record.get("leakPercentile")),
-            round_digits=1,
-        )
-    if sensor_desc.key == "sleepScore":
-        return HistoricalStatisticDescription(
-            name=friendly_name,
-            unit_of_measurement=sensor_desc.native_unit_of_measurement,
-            value_fn=lambda record: _coerce_stat_number(record.get("sleepScore")),
-        )
-    return None
-
-
-def _coerce_stat_number(value: Any) -> float | int | None:
-    """Convert a record value to a recorder-compatible number."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int | float):
-        return value
-    try:
-        return float(value)
-    except TypeError, ValueError:
-        return None
-
-
-def _build_daily_usage_hours(sleep_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Build daily usage history for frontend charts."""
-    history: list[dict[str, Any]] = []
-    for record in sleep_records:
-        raw_start_date = record.get("startDate")
-        if not isinstance(raw_start_date, str):
-            continue
-        start_date = dt_util.parse_date(raw_start_date)
-        usage_minutes = record.get("totalUsage")
-        if start_date is None or usage_minutes is None:
-            continue
-        history.append(
-            {
-                "date": start_date.isoformat(),
-                "hours": _usage_minutes_to_hours(usage_minutes),
-                "minutes": max(int(usage_minutes), 0),
-                "ahi": _coerce_stat_number(record.get("ahi")),
-                "mask_on_off": _coerce_stat_number(record.get("maskPairCount")),
-                "mask_leak_percent": _coerce_stat_number(record.get("leakPercentile")),
-                "myair_score": _coerce_stat_number(record.get("sleepScore")),
-            }
-        )
-    return history
-
-
-def _usage_minutes_to_hours(usage_minutes: Any) -> float:
-    """Convert usage minutes to rounded hours."""
-    return round(max(float(usage_minutes), 0.0) / 60.0, 2)

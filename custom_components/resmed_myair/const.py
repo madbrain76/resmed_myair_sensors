@@ -14,6 +14,14 @@ VERSION = "v0.2.7"
 DOMAIN = "resmed_myair"
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 DEFAULT_UPDATE_RATE_MIN = 30
+HISTORY_STORE_VERSION = 1
+MAX_HISTORY_DAYS = 400
+RECORDER_STATE_FIELDS: Mapping[str, str] = {
+    "ahi": "ahi",
+    "maskPairCount": "maskPairCount",
+    "leakPercentile": "leakPercentile",
+    "sleepScore": "sleepScore",
+}
 
 AUTHN_SUCCESS = "SUCCESS"
 AUTH_NEEDS_MFA = "MFA_REQUIRED"

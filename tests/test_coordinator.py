@@ -128,7 +128,7 @@ async def test_async_update_data_recovers_sleep_details_from_recorder(
             }
 
     monkeypatch.setattr(
-        "custom_components.resmed_myair.coordinator.get_instance",
+        "custom_components.resmed_myair.recorder.get_instance",
         lambda hass: DummyRecorder(),
     )
 
