@@ -1,0 +1,71 @@
+name: pytest check and post coverage
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: pytest check and post coverage
+    if: >-
+      !(github.event_name == 'pull_request' &&
+      (contains(github.event.pull_request.labels.*.name, 'dependencies') ||
+      github.event.pull_request.user.type == 'Bot'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Debug GitHub Variables
+        run: |
+            echo "github.event_name: ${{ github.event_name }}"
+            echo "github.ref_name: ${{ github.ref_name }}"
+            echo "github.event.repository.default_branch: ${{ github.event.repository.default_branch }}"
+            echo "github.event.pull_request.user.type: ${{ github.event.pull_request.user.type }}"
+            echo "PR labels: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.labels.*.name) || '' }}"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Run pytest from the lock
+        run: uv run --locked --group pytest pytest
+
+      - name: Generate coverage comment data
+        if: github.event_name == 'pull_request'
+        id: coverage_comment
+        uses: py-cov-action/python-coverage-comment-action@v4.5
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTIVITY: process_pr
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 70
+
+      - name: Store PR coverage comment
+        if: steps.coverage_comment.outputs.comment_file_written == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-coverage-comment-action
+          path: python-coverage-comment-action.txt
+          retention-days: 1
+
+      - name: Store coverage data for trusted publication
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-coverage-data
+          path: .coverage
+          include-hidden-files: true
+          retention-days: 1

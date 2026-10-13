@@ -5,8 +5,8 @@
     "recorder"
   ],
   "codeowners": [
-    "@prestomation",
-    "@Snuffy2"
+    "@Snuffy2",
+    "@prestomation"
   ],
   "config_flow": true,
   "dependencies": [
@@ -16,8 +16,5 @@
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/prestomation/resmed_myair_sensors/issues",
-  "requirements": [
-    "PyJWT"
-  ],
-  "version": "v0.2.7"
+  "version": "0.0.0"
 }

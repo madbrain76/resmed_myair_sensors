@@ -18,6 +18,10 @@ class ParsingError(Exception):
     """Remote payload shape does not match the fields this integration requires."""
 
 
+class StaleSessionError(ParsingError):
+    """Remote response indicates the data API no longer accepts the session."""
+
+
 class MyAirConfig(NamedTuple):
     """Credentials and regional context needed to authenticate with myAir."""
 
@@ -31,11 +35,16 @@ class MyAirClient(ABC):
     """Abstract async contract consumed by the Home Assistant coordinator."""
 
     @abstractmethod
-    async def connect(self) -> str:
+    async def connect(self, initial: bool | None = False, *, force: bool = False) -> str:
         """Authenticate or validate cached credentials before data fetches.
 
+        Args:
+            initial (bool | None): Whether authentication is part of initial setup.
+            force (bool): Whether to bypass cached-token validation and authenticate
+                again.
+
         Returns:
-            Provider-specific auth status string.
+            str: Provider-specific auth status string.
         """
 
     @abstractmethod
@@ -43,10 +52,12 @@ class MyAirClient(ABC):
         """Fetch the account's assigned flow-generator device.
 
         Args:
-            initial: Whether the fetch is part of initial setup rather than polling.
+            initial (bool): Whether the fetch is part of initial setup rather than
+                polling.
 
         Returns:
-            Typed device metadata used for entity identity and device info.
+            MyAirDevice: Typed device metadata used for entity identity and device
+                info.
         """
 
     @abstractmethod
@@ -54,8 +65,10 @@ class MyAirClient(ABC):
         """Fetch recent nightly therapy records for sensor state.
 
         Args:
-            initial: Whether the fetch is part of initial setup rather than polling.
+            initial (bool): Whether the fetch is part of initial setup rather than
+                polling.
 
         Returns:
-            Typed sleep records ordered as returned by the transport implementation.
+            list[MyAirSleepRecord]: Typed sleep records ordered as returned by the
+                transport implementation.
         """

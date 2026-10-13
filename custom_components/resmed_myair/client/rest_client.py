@@ -12,7 +12,7 @@ from custom_components.resmed_myair.redaction import redact_dict
 
 from .auth import MyAirAuthSession
 from .graphql import MyAirGraphQLClient
-from .myair_client import MyAirClient, MyAirConfig, ParsingError
+from .myair_client import MyAirClient, MyAirConfig, ParsingError, StaleSessionError
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -21,11 +21,11 @@ def _required_mapping(value: Any, message: str) -> Mapping[str, Any]:
     """Validate that a decoded GraphQL payload member is a mapping.
 
     Args:
-        value: Payload member to validate.
-        message: Parsing error message to raise when validation fails.
+        value (Any): Payload member to validate.
+        message (str): Parsing error message to raise when validation fails.
 
     Returns:
-        The original value typed as a mapping.
+        Mapping[str, Any]: The validated payload member.
 
     Raises:
         ParsingError: When the payload member is not a mapping.
@@ -35,19 +35,43 @@ def _required_mapping(value: Any, message: str) -> Mapping[str, Any]:
     return value
 
 
-def _required_list(value: Any, message: str) -> list[Any]:
-    """Validate that a decoded GraphQL payload member is a JSON array.
+def _required_session_mapping(value: Any, message: str) -> Mapping[str, Any]:
+    """Validate a required mapping and mark an absent member as a stale session.
 
     Args:
-        value: Payload member to validate.
-        message: Parsing error message to raise when validation fails.
+        value (Any): Required response member to validate.
+        message (str): Parsing error message raised for an invalid member.
 
     Returns:
-        The original value typed as a list.
+        Mapping[str, Any]: The validated response member.
 
     Raises:
-        ParsingError: When the payload member is not a list.
+        StaleSessionError: When the required response member is absent.
+        ParsingError: When the response member is present but malformed.
     """
+    if value is None:
+        raise StaleSessionError(message)
+    if not isinstance(value, Mapping):
+        raise ParsingError(message)
+    return value
+
+
+def _required_session_list(value: Any, message: str) -> list[Any]:
+    """Validate a required list and mark an absent member as a stale session.
+
+    Args:
+        value (Any): Required response member to validate.
+        message (str): Parsing error message raised for an invalid member.
+
+    Returns:
+        list[Any]: The validated response member.
+
+    Raises:
+        StaleSessionError: When the required response member is absent.
+        ParsingError: When the response member is present but malformed.
+    """
+    if value is None:
+        raise StaleSessionError(message)
     if not isinstance(value, list):
         raise ParsingError(message)
     return value
@@ -57,10 +81,11 @@ def _optional_mask_code(patient_wrapper: Mapping[str, Any]) -> str | None:
     """Extract a mask code from optional myAir mask metadata.
 
     Args:
-        patient_wrapper: Decoded ``getPatientWrapper`` GraphQL payload.
+        patient_wrapper (Mapping[str, Any]): Decoded ``getPatientWrapper`` GraphQL payload.
 
     Returns:
-        First non-empty mask code, or ``None`` when mask metadata is absent or malformed.
+        str | None: First non-empty mask code, or ``None`` when metadata is absent
+            or malformed.
     """
     masks = patient_wrapper.get("masks")
     if not isinstance(masks, list) or not masks:
@@ -96,8 +121,8 @@ class RESTClient(MyAirClient):
         """Create auth and GraphQL helpers around a shared aiohttp session.
 
         Args:
-            config: User credentials, region, and optional remembered-device token.
-            session: Home Assistant-managed aiohttp session.
+            config (MyAirConfig): User credentials, region, and remembered-device token.
+            session (ClientSession): Home Assistant-managed aiohttp session.
         """
         _LOGGER.debug("[RESTClient init] config: %s", redact_dict(config._asdict()))
         self._config: MyAirConfig = config
@@ -114,31 +139,37 @@ class RESTClient(MyAirClient):
         """Expose the remembered-device token that should be saved in config entries."""
         return self._auth.device_token
 
-    async def connect(self, initial: bool | None = False) -> str:
+    async def connect(self, initial: bool | None = False, *, force: bool = False) -> str:
         """Authenticate with myAir or reuse an active OAuth token.
 
         Args:
-            initial: Whether the call is part of config setup, where MFA can be
+            initial (bool | None): Whether the call is part of config setup, where MFA can be
                 triggered and surfaced to the user.
+            force (bool): Whether to bypass cached-token validation and authenticate
+                again.
 
         Returns:
-            Okta authentication status.
+            str: Okta authentication status.
         """
-        return await self._auth.connect(initial=initial)
+        return await self._auth.connect(initial=initial, force=force)
 
     async def verify_mfa_and_get_access_token(self, verification_code: str) -> str:
         """Complete an MFA challenge and cache OAuth tokens.
 
         Args:
-            verification_code: Email MFA code supplied by the user.
+            verification_code (str): Email MFA code supplied by the user.
 
         Returns:
-            Okta authentication status after MFA verification.
+            str: Okta authentication status after MFA verification.
         """
         return await self._auth.verify_mfa_and_get_access_token(verification_code)
 
     async def is_email_verified(self) -> bool:
-        """Return whether Okta userinfo reports a verified email address."""
+        """Return whether Okta userinfo reports a verified email address.
+
+        Returns:
+            bool: ``True`` when the account email is verified.
+        """
         return await self._auth.is_email_verified()
 
     async def _gql_query(
@@ -147,12 +178,12 @@ class RESTClient(MyAirClient):
         """Execute a myAir AppSync operation with the current auth state.
 
         Args:
-            operation_name: GraphQL operation name sent to AppSync.
-            query: GraphQL document to execute.
-            initial: Whether the query is part of config setup.
+            operation_name (str): GraphQL operation name sent to AppSync.
+            query (str): GraphQL document to execute.
+            initial (bool | None): Whether the query is part of config setup.
 
         Returns:
-            Decoded GraphQL response payload.
+            dict[str, Any]: Decoded GraphQL response payload.
         """
         return await self._graphql.query(operation_name, query, initial=bool(initial))
 
@@ -160,10 +191,13 @@ class RESTClient(MyAirClient):
         """Fetch and normalize the recent nightly sleep records.
 
         Args:
-            initial: Whether this fetch is part of config setup.
+            initial (bool): Whether this fetch is part of config setup.
 
         Returns:
-            Typed records returned by myAir for the last 30 days.
+            list[MyAirSleepRecord]: Typed records returned by myAir for the last 30 days.
+
+        Raises:
+            ParsingError: When the GraphQL response omits or malforms sleep record data.
         """
         today_date: datetime.date = datetime.datetime.now(datetime.UTC).astimezone().date()
         today: str = today_date.isoformat()
@@ -202,14 +236,16 @@ class RESTClient(MyAirClient):
             "GetPatientSleepRecords", query, initial
         )
         _LOGGER.debug("[get_sleep_records] records_dict: %s", redact_dict(records_dict))
-        data = _required_mapping(records_dict.get("data"), "Error getting Patient Sleep Records")
-        patient_wrapper = _required_mapping(
+        data = _required_session_mapping(
+            records_dict.get("data"), "Error getting Patient Sleep Records"
+        )
+        patient_wrapper = _required_session_mapping(
             data.get("getPatientWrapper"), "Error getting Patient Sleep Records"
         )
-        sleep_records = _required_mapping(
+        sleep_records = _required_session_mapping(
             patient_wrapper.get("sleepRecords"), "Error getting Patient Sleep Records"
         )
-        records = _required_list(
+        records = _required_session_list(
             sleep_records.get("items"),
             "Error getting Patient Sleep Records. Returned records is not a list",
         )
@@ -230,10 +266,13 @@ class RESTClient(MyAirClient):
         """Fetch and normalize the account's assigned flow-generator device.
 
         Args:
-            initial: Whether this fetch is part of config setup.
+            initial (bool): Whether this fetch is part of config setup.
 
         Returns:
-            Typed device data enriched with the first mask code when available.
+            MyAirDevice: Device data enriched with the first mask code when available.
+
+        Raises:
+            ParsingError: When the GraphQL response omits or malforms device data.
         """
         query: str = """
         query getPatientWrapper {
@@ -259,11 +298,13 @@ class RESTClient(MyAirClient):
             "getPatientWrapper", query, initial
         )
         _LOGGER.debug("[get_user_device_data] records_dict: %s", redact_dict(records_dict))
-        data = _required_mapping(records_dict.get("data"), "Error getting User Device Data")
-        patient_wrapper = _required_mapping(
+        data = _required_session_mapping(records_dict.get("data"), "Error getting User Device Data")
+        patient_wrapper = _required_session_mapping(
             data.get("getPatientWrapper"), "Error getting User Device Data"
         )
-        devices = _required_list(patient_wrapper.get("fgDevices"), "Error getting User Device Data")
+        devices = _required_session_list(
+            patient_wrapper.get("fgDevices"), "Error getting User Device Data"
+        )
         if not devices:
             raise ParsingError("Error getting User Device Data")
         device = dict(

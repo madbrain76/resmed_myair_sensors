@@ -5,14 +5,13 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   linters:
-    name: Run Linters
+    name: review
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -20,5 +19,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup uv (with caching)
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.14"
+          enable-cache: true
+          ignore-nothing-to-cache: true
+          cache-dependency-glob: uv.lock
+
       - name: Run prek
         uses: j178/prek-action@v2
+        env:
+          UV_LOCKED: "1"

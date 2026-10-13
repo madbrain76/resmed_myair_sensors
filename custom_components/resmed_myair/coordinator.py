@@ -11,7 +11,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .client.myair_client import AuthenticationError, MyAirClient, ParsingError
+from .client.myair_client import AuthenticationError, MyAirClient, ParsingError, StaleSessionError
 from .const import DEFAULT_UPDATE_RATE_MIN, HISTORY_STORE_VERSION, MAX_HISTORY_DAYS
 from .models import MyAirCoordinatorData, MyAirDevice, MyAirSleepRecord
 from .recorder import async_get_sleep_history_from_recorder, normalize_sleep_history
@@ -33,9 +33,11 @@ class MyAirDataUpdateCoordinator(DataUpdateCoordinator[MyAirCoordinatorData]):
         """Configure periodic myAir polling for a config entry.
 
         Args:
-            hass: Home Assistant instance running the coordinator.
-            config_entry: myAir config entry associated with this coordinator.
-            myair_client: Client used to authenticate and fetch myAir data.
+            hass (HomeAssistant): Home Assistant instance running the coordinator.
+            config_entry (ConfigEntry): myAir config entry associated with this
+                coordinator.
+            myair_client (MyAirClient): Client used to authenticate and fetch
+                myAir data.
         """
         _LOGGER.info("Initializing DataUpdateCoordinator for ResMed myAir")
         self.myair_client = myair_client
@@ -67,26 +69,36 @@ class MyAirDataUpdateCoordinator(DataUpdateCoordinator[MyAirCoordinatorData]):
         """Refresh auth, device metadata, and recent sleep records.
 
         Returns:
-            Typed coordinator payload containing any data available from myAir.
-
-        Raises:
-            ConfigEntryAuthFailed: When myAir authentication must be repaired by reauth.
+            MyAirCoordinatorData: Typed coordinator payload containing any data
+                available from myAir.
         """
         _LOGGER.info("Updating from myAir")
 
-        try:
-            await self.myair_client.connect()
-        except AuthenticationError as e:
-            _LOGGER.error("Authentication Error while updating. %s: %s", type(e).__name__, e)
-            raise ConfigEntryAuthFailed(
-                f"Authentication Error while updating. {type(e).__name__}: {e}"
-            ) from e
+        await self._async_connect()
 
         device: MyAirDevice | None = None
         sleep_records: tuple[MyAirSleepRecord, ...] = ()
+        fresh_auth_used = False
 
         try:
             device = await self.myair_client.get_user_device_data()
+        except StaleSessionError as err:
+            _LOGGER.info(
+                "Device payload missing after token validation. %s: %s",
+                type(err).__name__,
+                err,
+            )
+            _LOGGER.info("Retrying device data with fresh authentication")
+            await self._async_connect(force=True)
+            fresh_auth_used = True
+            try:
+                device = await self.myair_client.get_user_device_data()
+            except ParsingError as retry_err:
+                _LOGGER.debug(
+                    "Device data unavailable after fresh authentication. %s: %s",
+                    type(retry_err).__name__,
+                    retry_err,
+                )
         except ParsingError as err:
             _LOGGER.debug(
                 "Device data unavailable in myAir update. %s: %s",
@@ -98,6 +110,23 @@ class MyAirDataUpdateCoordinator(DataUpdateCoordinator[MyAirCoordinatorData]):
 
         try:
             sleep_records = tuple(await self.myair_client.get_sleep_records())
+        except StaleSessionError as err:
+            _LOGGER.info(
+                "Sleep record payload missing after token validation. %s: %s",
+                type(err).__name__,
+                err,
+            )
+            if not fresh_auth_used:
+                _LOGGER.info("Retrying sleep record data with fresh authentication")
+                await self._async_connect(force=True)
+                try:
+                    sleep_records = tuple(await self.myair_client.get_sleep_records())
+                except ParsingError as retry_err:
+                    _LOGGER.debug(
+                        "Sleep record data unavailable after fresh authentication. %s: %s",
+                        type(retry_err).__name__,
+                        retry_err,
+                    )
         except ParsingError as err:
             _LOGGER.debug(
                 "Sleep record data unavailable in myAir update. %s: %s",
@@ -116,6 +145,31 @@ class MyAirDataUpdateCoordinator(DataUpdateCoordinator[MyAirCoordinatorData]):
         await self._sleep_history_store.async_save(self._sleep_history)
 
         return MyAirCoordinatorData(device=device, sleep_records=sleep_records)
+
+    async def _async_connect(self, *, force: bool = False) -> None:
+        """Authenticate for a coordinator refresh and map auth failures.
+
+        Args:
+            force (bool): Whether to bypass cached-token validation and authenticate
+                again.
+
+        Raises:
+            ConfigEntryAuthFailed: When myAir authentication requires user repair.
+        """
+        try:
+            if force:
+                await self.myair_client.connect(force=True)
+            else:
+                await self.myair_client.connect()
+        except AuthenticationError as err:
+            _LOGGER.error(
+                "Authentication Error while updating. %s: %s",
+                type(err).__name__,
+                err,
+            )
+            raise ConfigEntryAuthFailed(
+                f"Authentication Error while updating. {type(err).__name__}: {err}"
+            ) from err
 
     @property
     def chart_sleep_records(self) -> list[dict[str, Any]]:
