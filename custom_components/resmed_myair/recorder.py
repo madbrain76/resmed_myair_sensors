@@ -6,9 +6,14 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, cast
 
 from homeassistant.components.recorder import get_instance
-from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
+from homeassistant.components.recorder.models import (
+    StatisticData,
+    StatisticMeanType,
+    StatisticMetaData,
+)
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
+    async_update_statistics_metadata,
     get_last_statistics,
     statistics_during_period,
 )
@@ -20,7 +25,7 @@ from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.util import dt as dt_util, slugify
 from homeassistant.util.unit_conversion import VolumeFlowRateConverter
 
-from .const import DOMAIN, MAX_HISTORY_DAYS, RECORDER_STATE_FIELDS
+from .const import DOMAIN, MAX_DAILY_USAGE_ATTRIBUTE_DAYS, MAX_HISTORY_DAYS, RECORDER_STATE_FIELDS
 from .models import MyAirSleepRecord
 
 _MASK_LEAK_UNIQUE_ID_SUFFIX = "_leakPercentile"
@@ -33,6 +38,7 @@ class HistoricalStatisticDescription:
     name: str
     unit_of_measurement: str | None
     value_fn: Callable[[Mapping[str, Any]], float | int | None]
+    unit_class: str | None = None
     import_mode: str = "state"
     round_digits: int | None = None
 
@@ -41,10 +47,12 @@ def normalize_sleep_history(history: Sequence[Mapping[str, Any]]) -> list[dict[s
     """Drop invalid or future-dated history entries and sort by date.
 
     Args:
-        history: Raw sleep history mappings from storage, recorder, or the API.
+        history (Sequence[Mapping[str, Any]]): Raw sleep history mappings from
+            storage, recorder, or the API.
 
     Returns:
-        Chronologically sorted sleep history records safe for charting and import.
+        list[dict[str, Any]]: Chronologically sorted sleep history records safe for
+            charting and import.
     """
     today = dt_util.now().date()
     normalized: list[dict[str, Any]] = []
@@ -68,12 +76,12 @@ def historical_statistic_id(
     """Build the recorder statistic ID for a sensor historical import.
 
     Args:
-        serial_number: Flow generator serial number used in entity unique IDs.
-        sensor_key: Sensor key or synthetic sensor key.
-        import_mode: Recorder import mode; non-state imports get a suffix.
+        serial_number (str): Flow generator serial number used in entity unique IDs.
+        sensor_key (str): Sensor key or synthetic sensor key.
+        import_mode (str): Recorder import mode; non-state imports get a suffix.
 
     Returns:
-        Fully-qualified recorder statistic ID.
+        str: Fully-qualified recorder statistic ID.
     """
     suffix = f"{sensor_key}_{import_mode}" if import_mode != "state" else sensor_key
     return f"{DOMAIN}:{slugify(f'{serial_number}_{suffix}')}"
@@ -83,10 +91,10 @@ def usage_minutes_to_hours(usage_minutes: Any) -> float:
     """Convert usage minutes to rounded hours.
 
     Args:
-        usage_minutes: Raw usage minutes from myAir or recovered recorder data.
+        usage_minutes (Any): Raw usage minutes from myAir or recovered recorder data.
 
     Returns:
-        Non-negative decimal hours rounded for recorder statistics.
+        float: Non-negative decimal hours rounded for recorder statistics.
     """
     return round(max(float(usage_minutes), 0.0) / 60.0, 2)
 
@@ -98,11 +106,13 @@ def build_sleep_record_statistic(
     """Build a recorder statistic description for nightly sleep metrics.
 
     Args:
-        friendly_name: Statistic display name.
-        sensor_desc: Sensor description declaring the raw myAir field and unit.
+        friendly_name (str): Statistic display name.
+        sensor_desc (SensorEntityDescription): Sensor description declaring the raw
+            myAir field and unit.
 
     Returns:
-        Historical statistic description for supported fields, otherwise ``None``.
+        HistoricalStatisticDescription | None: Historical statistic description for
+            supported fields, otherwise ``None``.
     """
     if sensor_desc.key == "ahi":
         return HistoricalStatisticDescription(
@@ -122,6 +132,7 @@ def build_sleep_record_statistic(
             name=friendly_name,
             unit_of_measurement=sensor_desc.native_unit_of_measurement,
             value_fn=lambda record: _coerce_stat_number(record.get("leakPercentile")),
+            unit_class=VolumeFlowRateConverter.UNIT_CLASS,
             round_digits=1,
         )
     if sensor_desc.key == "sleepScore":
@@ -137,13 +148,14 @@ def build_daily_usage_hours(sleep_records: Sequence[Mapping[str, Any]]) -> list[
     """Build daily usage history for frontend charts.
 
     Args:
-        sleep_records: Raw sleep records containing usage and optional detail fields.
+        sleep_records (Sequence[Mapping[str, Any]]): Raw sleep records containing
+            usage and optional detail fields.
 
     Returns:
-        Chronological daily chart rows.
+        list[dict[str, Any]]: Chronological daily chart rows.
     """
     history: list[dict[str, Any]] = []
-    for record in normalize_sleep_history(sleep_records):
+    for record in normalize_sleep_history(sleep_records)[-MAX_DAILY_USAGE_ATTRIBUTE_DAYS:]:
         start_date = dt_util.parse_date(record["startDate"])
         usage_minutes = record.get("totalUsage")
         if start_date is None or usage_minutes is None:
@@ -171,10 +183,12 @@ async def async_import_historical_statistics(
     """Import nightly historical data into recorder statistics.
 
     Args:
-        hass: Home Assistant instance with recorder access.
-        sleep_records: Typed myAir sleep records from the latest API response.
-        statistic_id: Recorder statistic ID to import into.
-        statistic_desc: Statistic value extraction and metadata description.
+        hass (HomeAssistant): Home Assistant instance with recorder access.
+        sleep_records (Sequence[MyAirSleepRecord]): Typed myAir sleep records from
+            the latest API response.
+        statistic_id (str): Recorder statistic ID to import into.
+        statistic_desc (HistoricalStatisticDescription): Statistic value extraction
+            and metadata description.
     """
     if not sleep_records:
         return
@@ -220,20 +234,30 @@ async def async_import_historical_statistics(
         else:
             statistics.append(StatisticData(start=start, state=stat_value))
 
-    if not statistics:
-        return
-
     metadata = cast(
         "StatisticMetaData",
         {
             "has_mean": False,
             "has_sum": statistic_desc.import_mode == "sum",
+            "mean_type": StatisticMeanType.NONE,
             "name": statistic_desc.name,
             "source": DOMAIN,
             "statistic_id": statistic_id,
+            "unit_class": statistic_desc.unit_class,
             "unit_of_measurement": statistic_desc.unit_of_measurement,
         },
     )
+
+    if statistic_desc.unit_of_measurement is not None or statistic_desc.unit_class is not None:
+        async_update_statistics_metadata(
+            hass,
+            statistic_id,
+            new_unit_class=statistic_desc.unit_class,
+            new_unit_of_measurement=statistic_desc.unit_of_measurement,
+        )
+
+    if not statistics:
+        return
 
     async_add_external_statistics(hass, metadata, statistics)
 
@@ -245,11 +269,13 @@ async def async_get_sleep_history_from_recorder(
     """Load sleep history recoverable from recorder statistics.
 
     Args:
-        hass: Home Assistant instance with recorder access.
-        serial_number: Flow generator serial number used in statistic IDs.
+        hass (HomeAssistant): Home Assistant instance with recorder access.
+        serial_number (str | None): Flow generator serial number used in statistic
+            IDs.
 
     Returns:
-        Chronological sleep-history records reconstructed from recorder statistics.
+        list[dict[str, Any]]: Chronological sleep-history records reconstructed from
+            recorder statistics.
     """
     if not serial_number:
         return []
@@ -359,11 +385,11 @@ def _round_stat_value(value: float, digits: int | None) -> float:
     """Normalize a value for recorder statistics.
 
     Args:
-        value: Raw numeric statistic value.
-        digits: Optional decimal places to round to.
+        value (float): Raw numeric statistic value.
+        digits (int | None): Optional decimal places to round to.
 
     Returns:
-        Float value suitable for recorder statistics.
+        float: Value suitable for recorder statistics.
     """
     rounded = round(float(value), digits) if digits is not None else float(value)
     return float(rounded)
@@ -373,10 +399,11 @@ def _coerce_stat_number(value: Any) -> float | int | None:
     """Convert a record value to a recorder-compatible number.
 
     Args:
-        value: Raw myAir value.
+        value (Any): Raw myAir value.
 
     Returns:
-        Numeric value accepted by recorder statistics, otherwise ``None``.
+        float | int | None: Numeric value accepted by recorder statistics, otherwise
+            ``None``.
     """
     if value is None:
         return None
@@ -394,10 +421,10 @@ def _usage_hours_sum_statistic_id(serial_number: str) -> str:
     """Build the recorder statistic ID for usage hours.
 
     Args:
-        serial_number: Flow generator serial number.
+        serial_number (str): Flow generator serial number.
 
     Returns:
-        Usage-hours cumulative statistic ID.
+        str: Usage-hours cumulative statistic ID.
     """
     return historical_statistic_id(serial_number, "usageHours", "sum")
 
@@ -406,11 +433,11 @@ def _recorder_state_statistic_id(serial_number: str, sensor_key: str) -> str:
     """Build the recorder statistic ID for a nightly state metric.
 
     Args:
-        serial_number: Flow generator serial number.
-        sensor_key: Sensor key used in the statistic ID.
+        serial_number (str): Flow generator serial number.
+        sensor_key (str): Sensor key used in the statistic ID.
 
     Returns:
-        State statistic ID for the requested field.
+        str: State statistic ID for the requested field.
     """
     return historical_statistic_id(serial_number, sensor_key)
 
@@ -419,10 +446,10 @@ def _statistics_row_date(value: Any) -> date:
     """Convert recorder statistics row start values to a local date.
 
     Args:
-        value: Recorder row ``start`` value as a datetime or timestamp.
+        value (Any): Recorder row ``start`` value as a datetime or timestamp.
 
     Returns:
-        Local date represented by the recorder row.
+        date: Local date represented by the recorder row.
 
     Raises:
         TypeError: If the row start value has an unexpected type.

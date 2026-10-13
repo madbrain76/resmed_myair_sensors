@@ -180,7 +180,15 @@ class MyAirDataUpdateCoordinator(DataUpdateCoordinator[MyAirCoordinatorData]):
 
 
 def _coordinator_data_sleep_records(data: Any) -> tuple[MyAirSleepRecord, ...]:
-    """Return sleep records from a typed coordinator payload if available."""
+    """Return sleep records from a typed coordinator payload if available.
+
+    Args:
+        data (Any): Value currently held by the update coordinator.
+
+    Returns:
+        tuple[MyAirSleepRecord, ...]: Sleep records from a typed payload, or an
+            empty tuple while the coordinator has no data.
+    """
     if isinstance(data, MyAirCoordinatorData):
         return data.sleep_records
     return ()
@@ -190,7 +198,17 @@ def _merge_sleep_history(
     existing_history: list[dict[str, Any]],
     latest_records: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge new cloud or recorder records into persisted sleep history."""
+    """Merge new cloud or recorder records into persisted sleep history.
+
+    Args:
+        existing_history (list[dict[str, Any]]): Persisted history from prior
+            coordinator updates.
+        latest_records (Sequence[Mapping[str, Any]]): New cloud or recorder rows.
+
+    Returns:
+        list[dict[str, Any]]: Chronological merged history, capped to the supported
+            retention window.
+    """
     merged_by_date: dict[str, dict[str, Any]] = {
         record["startDate"]: dict(record)
         for record in normalize_sleep_history(existing_history)

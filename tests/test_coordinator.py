@@ -90,7 +90,13 @@ def test_merge_sleep_history_preserves_existing_fields_for_partial_records() -> 
 async def test_async_update_data_recovers_sleep_details_from_recorder(
     hass: MagicMock, myair_client: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Coordinator should recover historical details from existing recorder statistics."""
+    """Coordinator should recover historical details from existing recorder statistics.
+
+    Args:
+        hass (MagicMock): Home Assistant instance supplied to the coordinator.
+        myair_client (MagicMock): Client double returning device and sleep data.
+        monkeypatch (pytest.MonkeyPatch): Pytest patch fixture used for the recorder.
+    """
     myair_client.get_user_device_data.return_value = MyAirDevice.from_api(
         {"serialNumber": "23172442329"}
     )

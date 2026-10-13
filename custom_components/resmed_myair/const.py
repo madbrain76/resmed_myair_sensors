@@ -16,6 +16,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR]
 DEFAULT_UPDATE_RATE_MIN = 30
 HISTORY_STORE_VERSION = 1
 MAX_HISTORY_DAYS = 400
+MAX_DAILY_USAGE_ATTRIBUTE_DAYS = 90
 RECORDER_STATE_FIELDS: Mapping[str, str] = {
     "ahi": "ahi",
     "maskPairCount": "maskPairCount",

@@ -19,11 +19,13 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_conversion import DurationConverter
 
 from .const import (
     CONF_USER_NAME,
     DEVICE_SENSOR_DESCRIPTIONS,
     DOMAIN,
+    MAX_DAILY_USAGE_ATTRIBUTE_DAYS,
     SLEEP_RECORD_SENSOR_DESCRIPTIONS,
     VERSION,
 )
@@ -301,7 +303,14 @@ class MyAirSleepRecordSensor(MyAirRawSensor):
         sensor_desc: SensorEntityDescription,
         coordinator: MyAirDataUpdateCoordinator,
     ) -> None:
-        """Initialize a raw sleep-record sensor."""
+        """Initialize a raw sleep-record sensor.
+
+        Args:
+            friendly_name (str): User-visible name for the sensor.
+            sensor_desc (SensorEntityDescription): Raw myAir field definition.
+            coordinator (MyAirDataUpdateCoordinator): Data coordinator that supplies
+                sleep records.
+        """
         super().__init__(friendly_name, sensor_desc, coordinator)
         self._historical_statistic_desc = build_sleep_record_statistic(friendly_name, sensor_desc)
 
@@ -386,7 +395,12 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
         self,
         coordinator: MyAirDataUpdateCoordinator,
     ) -> None:
-        """Initialize the synthesized usage-hours entity."""
+        """Initialize the synthesized usage-hours entity.
+
+        Args:
+            coordinator (MyAirDataUpdateCoordinator): Data coordinator that supplies
+                sleep records.
+        """
         desc = SensorEntityDescription(
             key="usageHours",
             device_class=SensorDeviceClass.DURATION,
@@ -403,6 +417,7 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
                 if record.get("totalUsage") is None
                 else usage_minutes_to_hours(record["totalUsage"])
             ),
+            unit_class=DurationConverter.UNIT_CLASS,
             import_mode="sum",
             round_digits=2,
         )
@@ -416,9 +431,10 @@ class MyAirUsageHoursSensor(MyAirBaseSensor):
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return extra state attributes for dashboard cards."""
         attributes = dict(super().extra_state_attributes or {})
-        attributes["daily_usage_hours"] = build_daily_usage_hours(
-            self.coordinator.chart_sleep_records
-        )
+        chart_records = self.coordinator.chart_sleep_records
+        attributes["daily_usage_hours"] = build_daily_usage_hours(chart_records)
+        attributes["daily_usage_hours_retained_days"] = MAX_DAILY_USAGE_ATTRIBUTE_DAYS
+        attributes["daily_usage_hours_available_days"] = len(chart_records)
         return attributes
 
     @callback
@@ -452,7 +468,13 @@ class MyAirUsageHoursAverageSensor(MyAirBaseSensor):
         coordinator: MyAirDataUpdateCoordinator,
         days: int,
     ) -> None:
-        """Initialize a rolling usage-hours average entity."""
+        """Initialize a rolling usage-hours average entity.
+
+        Args:
+            coordinator (MyAirDataUpdateCoordinator): Data coordinator that supplies
+                sleep records.
+            days (int): Number of nightly records included in the average.
+        """
         desc = SensorEntityDescription(
             key=f"usageHoursAverage{days}",
             device_class=SensorDeviceClass.DURATION,
